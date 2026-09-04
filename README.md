@@ -1,4 +1,4 @@
-💧 WaterMeter Zigbee
+#💧 WaterMeter Zigbee
 
 WaterMeter is a Zigbee water meter based on the ESP32-C6, designed to monitor water consumption using a CNY70 reflective optical sensor.
 
@@ -6,7 +6,7 @@ The device detects the movement of a mechanical water meter, counts the measured
 
 The project is developed using ESP-IDF and Espressif's Zigbee SDK, with an external converter for Zigbee2MQTT.
 
-🚧 Project status
+#🚧 Project status
 
 Working prototype
 
@@ -25,7 +25,7 @@ Zigbee network commissioning
 Light Sleep support
 Periodic sensor sampling
 Zigbee2MQTT support through an external converter
-🧠 How it works
+#🧠 How it works
 
 The WaterMeter monitors the mechanical movement of the water meter using a CNY70 reflective optical sensor.
 
@@ -46,7 +46,7 @@ When the sensor changes from the inactive state to the active state, the firmwar
 
 The sensor is sampled every 10 seconds.
 
-📐 Measurement
+#📐 Measurement
 
 The internal counter represents the number of detected water-meter rotations.
 
@@ -66,7 +66,8 @@ Unit: m³
 Multiplier: 1
 Divisor: 1000
 Device type: Water Metering
-🔌 Hardware
+
+#🔌 Hardware
 Main components
 Component	Description
 ESP32-C6	Main microcontroller and Zigbee radio
@@ -81,7 +82,7 @@ CNY70 analog output	GPIO 0 / ADC
 
 The CNY70 is read through the ESP32-C6 ADC.
 
-📡 Zigbee
+#📡 Zigbee
 
 The device operates as a Zigbee End Device.
 
@@ -106,7 +107,7 @@ This attribute contains the accumulated water consumption.
 
 The firmware configures this attribute for Zigbee reporting.
 
-📲 Zigbee2MQTT
+#📲 Zigbee2MQTT
 
 The WaterMeter is designed to be used with Zigbee2MQTT through an external converter.
 
@@ -124,7 +125,7 @@ external_converters/
 
 The converter is maintained together with the firmware in this repository so that a complete working version of the WaterMeter can be reproduced from the repository.
 
-⚙️ Installing the external converter
+#⚙️ Installing the external converter
 
 Copy:
 
@@ -153,7 +154,7 @@ After installing the converter, restart Zigbee2MQTT.
 
 The device can then be paired with the Zigbee network.
 
-🔄 Zigbee reporting
+#🔄 Zigbee reporting
 
 When a new water-meter rotation is detected, the firmware:
 
@@ -164,7 +165,7 @@ Sends a Zigbee attribute report when the device is connected.
 
 An initial measurement is also sent after the device establishes its Zigbee connection.
 
-🏠 Zigbee2MQTT → Home Assistant
+#🏠 Zigbee2MQTT → Home Assistant
 
 The intended data flow is:
 
@@ -182,7 +183,7 @@ Mechanical water meter
 
 The external converter allows Zigbee2MQTT to correctly identify and expose the WaterMeter's metering information.
 
-😴 Light Sleep
+#😴 Light Sleep
 
 The project is designed to operate as a low-power Zigbee End Device.
 
@@ -194,7 +195,7 @@ After the connection process, the device releases the power-management lock and 
 
 The objective is to reduce power consumption while maintaining the functionality required by the Zigbee End Device.
 
-💾 Data persistence
+#💾 Data persistence
 
 The accumulated water consumption is stored in the ESP32-C6's non-volatile storage (NVS).
 
@@ -208,7 +209,7 @@ total_voltas
 
 This allows the accumulated measurement to survive a restart or power interruption.
 
-🛠️ Software
+#🛠️ Software
 
 The project is developed using:
 
@@ -227,7 +228,8 @@ Development and testing are currently performed using:
 ESP-IDF 5.2.6
 Target
 ESP32-C6
-📦 Project structure
+
+#📦 Project structure
 watermeter/
 │
 ├── CMakeLists.txt
@@ -249,7 +251,8 @@ watermeter/
     ├── idf_component.yml
     ├── watermeter.c
     └── watermeter.h
-🚀 Building the firmware
+
+#🚀 Building the firmware
 
 Clone the repository:
 
@@ -267,7 +270,8 @@ idf.py menuconfig
 Build:
 
 idf.py build
-🔥 Flashing the ESP32-C6
+
+##🔥 Flashing the ESP32-C6
 
 Connect the ESP32-C6 development board to the computer and identify the serial port.
 
@@ -282,7 +286,8 @@ idf.py -p COM9 flash
 To build, flash and monitor:
 
 idf.py -p COM9 flash monitor
-🖥️ Serial monitor
+
+##🖥️ Serial monitor
 
 The firmware outputs diagnostic information through the ESP-IDF logging system.
 
@@ -301,7 +306,8 @@ Water-meter detection
 Accumulated volume
 Zigbee reports
 Power-management events
-📊 Water measurement logic
+
+##📊 Water measurement logic
 
 The CNY70 is periodically illuminated and read through the ADC.
 
@@ -323,7 +329,7 @@ Each detected rotation adds:
 
 to the accumulated measurement.
 
-⚙️ Zigbee configuration
+##⚙️ Zigbee configuration
 
 The project uses the Zigbee channel configuration provided through ESP-IDF Kconfig.
 
@@ -338,7 +344,7 @@ nvs
 
 and is initialized during application startup.
 
-🔋 Power considerations
+#🔋 Power considerations
 
 The project is intended to eventually operate from batteries, making low-power operation an important part of the design.
 
@@ -356,7 +362,7 @@ Voltage regulator efficiency
 
 Power optimization remains part of the ongoing development.
 
-🧪 Development notes
+#🧪 Development notes
 
 The repository represents the current working state of the WaterMeter prototype.
 
@@ -382,7 +388,7 @@ Home Assistant
 
 The priority is reliable measurement and reliable Zigbee communication before adding additional functionality.
 
-📋 Current limitations
+#📋 Current limitations
 
 The project is still under development.
 
@@ -397,7 +403,8 @@ Improved device identification
 Further testing of Light Sleep behavior
 Additional diagnostics and error handling
 Integration of the converter into Zigbee2MQTT's official device definitions
-📄 License
+
+#📄 License
 
 This project is licensed under the:
 
@@ -407,7 +414,7 @@ See the LICENSE file for the complete license text.
 
 The GPLv3 is a free software license and a copyleft license published by the Free Software Foundation.
 
-👤 Author
+#👤 Author
 
 Bruno Tavares
 
@@ -415,7 +422,7 @@ GitHub repository:
 
 WaterMeter Zigbee — GitHub
 
-💧 Project goal
+#💧 Project goal
 
 The goal of the project is to transform a conventional mechanical water meter into a low-power Zigbee water meter capable of providing accumulated water-consumption data to a home automation system.
 
