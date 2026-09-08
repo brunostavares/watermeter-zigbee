@@ -24,7 +24,6 @@
 
 #include "watermeter.h"
 
-
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -42,6 +41,9 @@
 #include "ezbee/af.h"
 #include "ezbee/zha.h"
 
+#include "led_strip.h"
+#define RGB_LED_GPIO        GPIO_NUM_8
+static led_strip_handle_t led_strip = NULL;
 
 // ============================================================ //
 // CONFIGURAÇÕES E PINOS
@@ -61,12 +63,16 @@
 // Intervalo de amostragem (10 segundos) e estabilização do LED IR
 #define LEITURA_INTERVALO_MS    10000
 #define LED_ESTABILIZACAO_MS    20
+#define INTERVALO_HEATBEAT      360 // O adc task roda a cada 10 segundos, o dispositivo vai enviar dados repedidos depois de 3600 seg
 
 // Incremento por volta detectada (10 Litros)
 #define INCREMENTO_LITROS       10
 
 #define NVS_NAMESPACE           "water_meter"
 #define NVS_KEY_VOLTAS          "total_voltas"
+
+#define BOOT_BUTTON_GPIO    GPIO_NUM_9 
+#define RESET_HOLD_TIME_MS  3000 // Tempo necessário segurando o botão boot para reset (3 segundos)
 
 static adc_oneshot_unit_handle_t adc_handle;
 
@@ -80,6 +86,7 @@ static volatile bool cny_estado = false;
 static volatile uint64_t total_voltas = 0; // Total acumulado em Litros
 static volatile bool estado_inicializado = false;
 static volatile bool zigbee_connected = false;
+static volatile uint16_t heatbeat_counter = 0;
 
 portMUX_TYPE meter_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -88,6 +95,47 @@ static void report_zigbee_measurement(uint64_t current_volume);
 
 static const char *TAG = "LIGHT_SLEEP_END_DEVICE";
 
+// HoursInOperation (atributo 0x0202 do Metering)
+static uint32_t seconds_in_operation = 0;   // usamos uint32_t por praticidade
+static volatile uint32_t hours_in_operation = 0;   // usamos uint32_t por praticidade
+
+
+// --------------------------- LED ------------------------------------
+
+static void status_led_init(void)
+{
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = RGB_LED_GPIO,
+        .max_leds = 1,
+        .led_model = LED_MODEL_WS2812,
+        .flags.invert_out = false,
+    };
+
+    led_strip_rmt_config_t rmt_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10 * 1000 * 1000, // 10MHz
+        .flags.with_dma = false,
+    };
+
+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
+    led_strip_clear(led_strip);
+}
+
+static void status_led_set_red(void)
+{
+    if (led_strip) {
+        // Define R=32, G=0, B=0 (valor entre 0 e 255; 32 é suficiente para economizar energia)
+        led_strip_set_pixel(led_strip, 0, 32, 0, 0); 
+        led_strip_refresh(led_strip);
+    }
+}
+
+static void status_led_off(void)
+{
+    if (led_strip) {
+        led_strip_clear(led_strip);
+    }
+}
 
 
 // ============================================================ //
@@ -144,6 +192,38 @@ esp_err_t alarm_timer_schedule(alarm_timer_callback_t cb, alarm_timer_arg_t arg,
     }
 
     return ESP_OK;
+}
+
+// ============================================================ //
+// Verifica no startup se o botão de boot está pressionado para executar reset
+// ============================================================ //
+
+void check_factory_reset_button(void)
+{
+    // Configura o pino do botão BOOT como entrada com Pull-up interno
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << BOOT_BUTTON_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+
+    int hold_time = 0;
+    // O botão BOOT tem lógica invertida (0 = Pressionado, 1 = Solto)
+    while (gpio_get_level(BOOT_BUTTON_GPIO) == 0) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        hold_time += 100;
+
+        if (hold_time >= RESET_HOLD_TIME_MS) {
+            // Apaga APENAS as credenciais e dados de rede Zigbee da NVS
+            esp_zigbee_factory_reset();
+            // Aguarda um momento para a gravação e reinicia o chip
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            esp_restart();
+        }
+    }
 }
 
 // ============================================================ //
@@ -241,6 +321,8 @@ static void adc_task(void *pvParameters)
 {
     while (1) {
         int raw = 0;
+        seconds_in_operation += 10;
+        hours_in_operation = seconds_in_operation / 3600;
 
     #if CONFIG_ESP_SLEEP_DEBUG
         esp_pm_dump_locks(stdout);
@@ -297,6 +379,12 @@ static void adc_task(void *pvParameters)
             ESP_LOGE(TAG, "Erro na leitura do ADC: %s", esp_err_to_name(ret));
         }
 
+        heatbeat_counter++;
+        if (heatbeat_counter >= INTERVALO_HEATBEAT) {
+            ESP_LOGI(TAG, ">>> Enviando Heatbeat...");
+            report_zigbee_measurement(total_voltas);
+        }
+
         vTaskDelay(pdMS_TO_TICKS(LEITURA_INTERVALO_MS));
     }
 }
@@ -316,6 +404,7 @@ static void report_zigbee_measurement(uint64_t current_volume)
 
     esp_zigbee_lock_acquire(portMAX_DELAY);
 
+    // CURRENT_SUMMATION_DELIVERED
     ezb_zcl_set_attr_value(
         HA_ENDPOINT,
         EZB_ZCL_CLUSTER_ID_METERING,
@@ -323,6 +412,18 @@ static void report_zigbee_measurement(uint64_t current_volume)
         EZB_ZCL_ATTR_METERING_CURRENT_SUMMATION_DELIVERED_ID,
         0,
         &volume_total_u48,
+        false
+    );
+
+    // HOURS_IN_OPERATION
+    uint32_t value = hours_in_operation;
+    ezb_zcl_set_attr_value(
+        HA_ENDPOINT,
+        EZB_ZCL_CLUSTER_ID_METERING,
+        EZB_ZCL_CLUSTER_SERVER,
+        EZB_ZCL_ATTR_METERING_HOURS_IN_OPERATION_ID,
+        0,              // manufacturer code
+        &value,
         false
     );
 
@@ -343,9 +444,27 @@ static void report_zigbee_measurement(uint64_t current_volume)
     if (ret != EZB_ERR_NONE) {
         ESP_LOGE(TAG, "Falha ao enviar Report Attr (summation): 0x%04x", ret);
     }
+    
+// 2. Envia Report Attributes (hours in operation)
+    ezb_zcl_report_attr_cmd_t report_cmd_hours = {
+            .cmd_ctrl = {
+                .fc.direction       = EZB_ZCL_CMD_DIRECTION_TO_CLI,
+                .dst_addr.addr_mode = EZB_ADDR_MODE_NONE,
+                .src_ep             = HA_ENDPOINT,
+                .cluster_id         = EZB_ZCL_CLUSTER_ID_METERING,
+            },
+            .payload = {
+                .attr_id = EZB_ZCL_ATTR_METERING_HOURS_IN_OPERATION_ID,
+            },
+        };
+    ESP_LOGI(TAG, "hours: %lu", value);
+    ret = ezb_zcl_report_attr_cmd_req(&report_cmd_hours);
+    if (ret != EZB_ERR_NONE) {
+        ESP_LOGE(TAG, "Falha ao enviar Report Attr (hoursInOperation): 0x%04x", ret);
+    }
 
+    heatbeat_counter = 0; // zera o heatbeat sempre que há envio de informações
     esp_zigbee_lock_release();
-
     ESP_LOGI(TAG, "Reporte enviado ao Z2M");
 }
 
@@ -363,6 +482,7 @@ static void release_light_sleep_lock(alarm_timer_arg_t arg)
         esp_err_t err = esp_pm_lock_release(light_sleep_block_lock);
         if (err == ESP_OK) {
             ESP_LOGI(TAG, "Entrevista/Conexao concluida! Light sleep LIBERADO.");
+            report_zigbee_measurement(total_voltas);
             ezb_nwk_set_rx_on_when_idle(false);
         }
     }
@@ -375,6 +495,7 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
     switch (signal_type) {
     case EZB_ZDO_SIGNAL_SKIP_STARTUP:
         ESP_LOGI(TAG, "Initialize Zigbee stack");
+        status_led_set_red();
         ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_INITIALIZATION);
         break;
     case EZB_BDB_SIGNAL_DEVICE_FIRST_START:
@@ -383,15 +504,17 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
         if (status == EZB_BDB_STATUS_SUCCESS) {
             ESP_LOGI(TAG, "Device started up in%s factory-reset mode", ezb_bdb_is_factory_new() ? "" : " non");
             if (ezb_bdb_is_factory_new()) {
+                status_led_set_red();
                 ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
             } else {
                 ESP_LOGI(TAG, "Device reboot");
                 zigbee_connected = true;
-                report_zigbee_measurement(total_voltas);
-                alarm_timer_schedule(release_light_sleep_lock, 0, 10000);
+                status_led_off();
+                alarm_timer_schedule(release_light_sleep_lock, 0, 30000);
             }
         } else {
             ESP_LOGW(TAG, "%s failed with status(0x%02x), please retry", ezb_app_signal_to_string(signal_type), status);
+            status_led_set_red();
             alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_INITIALIZATION, 1000);
         }
     } break;
@@ -403,16 +526,18 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             ESP_LOGI(TAG, "Joined network successfully: PAN ID(0x%04hx, EXT: 0x%llx), Channel(%d), Short Address(0x%04hx)",
                      ezb_nwk_get_panid(), extended_pan_id.u64, ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
             zigbee_connected = true;
-            report_zigbee_measurement(total_voltas);
-            alarm_timer_schedule(release_light_sleep_lock, 0, 10000);
+            status_led_off();
+            alarm_timer_schedule(release_light_sleep_lock, 0, 30000);
         } else {
             ESP_LOGW(TAG, "Failed to join network with status(0x%02x)", status);
+            status_led_set_red();
             alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_NETWORK_STEERING, 1000);
         }
     } break;
     case EZB_ZDO_SIGNAL_LEAVE: {
         const ezb_zdo_signal_leave_params_t *leave_params = ezb_app_signal_get_params(app_signal);
         ESP_LOGI(TAG, "Left network successfully with type(0x%02x)", leave_params->leave_type);
+        status_led_set_red();
     } break;
     case EZB_NWK_SIGNAL_PERMIT_JOIN_STATUS: {
         uint8_t duration = *(uint8_t *)ezb_app_signal_get_params(app_signal);
@@ -485,6 +610,12 @@ esp_err_t esp_zigbee_create_sleepy_metering_device(void)
     ezb_zcl_metering_cluster_desc_add_attr(metering_desc,
                                         EZB_ZCL_ATTR_METERING_DIVISOR_ID,
                                         &divisor);
+    
+    // ===== NOVO: HoursInOperation =====
+    ezb_zcl_uint24_t hours_init = 0;
+    ezb_zcl_metering_cluster_desc_add_attr(metering_desc,
+                                       EZB_ZCL_ATTR_METERING_HOURS_IN_OPERATION_ID,
+                                       &hours_init);
 
     // ============================================================
     // ATRIBUTOS REPORTÁVEIS — usando a função genérica
@@ -512,6 +643,19 @@ esp_err_t esp_zigbee_create_sleepy_metering_device(void)
         ESP_LOGE(TAG, "Não encontrou o atributo CurrentSummationDelivered");
     }
 
+    // HOURS_IN_OPERATION JÁ EXISTE → só força a flag de reporting
+    ezb_zcl_attr_desc_t hours_attr = ezb_zcl_cluster_get_attr_desc(
+        metering_desc,
+        EZB_ZCL_ATTR_METERING_HOURS_IN_OPERATION_ID,
+        EZB_ZCL_STD_MANUF_CODE
+    );
+
+    if (hours_attr != EZB_INVALID_ZCL_ATTR_DESC) {
+        ezb_zcl_attr_desc_set_access(hours_attr,
+            EZB_ZCL_ATTR_ACCESS_READ | EZB_ZCL_ATTR_ACCESS_REPORTING);
+        ESP_LOGI(TAG, "HoursInOperation adicionado e configurado como REPORTABLE");
+    }
+
     // ---------- Endpoint ----------
     ezb_af_ep_config_t ep_config = {
         .ep_id              = HA_ENDPOINT,                 // campo correto: ep_id
@@ -530,10 +674,6 @@ esp_err_t esp_zigbee_create_sleepy_metering_device(void)
     ezb_af_device_desc_t device_desc = ezb_af_create_device_desc();
     ezb_af_device_add_endpoint_desc(device_desc, ep_desc);
     ezb_af_device_desc_register(device_desc);
-
-    //ezb_zcl_basic_cluster_server_init(HA_ENDPOINT);
-    //ezb_zcl_identify_cluster_server_init(HA_ENDPOINT);
-    //ezb_zcl_metering_cluster_server_init(HA_ENDPOINT);
 
     ezb_zcl_core_action_handler_register(esp_zigbee_zcl_core_action_handler);
 
@@ -645,8 +785,8 @@ static void esp_zigbee_stack_main_task(void *pvParameters)
 
 void app_main(void)
 {
-    //esp_zigbee_factory_reset();
-    //ESP_ERROR_CHECK(nvs_flash_init());
+    check_factory_reset_button();
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -660,6 +800,9 @@ void app_main(void)
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "Hidrômetro CNY70 + Zigbee (SDK v2.x) - Iniciando");
     ESP_LOGI(TAG, "========================================");
+
+    status_led_init();
+    status_led_set_red();
 
     carregar_total_voltas();
     cny70_led_init();

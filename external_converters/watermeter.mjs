@@ -23,6 +23,9 @@ const fzLocal = {
                 result.water_consumed = Number((rawLiters * factor).toFixed(3)); // m³
                 result.water_consumed_liters = rawLiters;                        // L
             }
+            if (msg.data.hoursInOperation !== undefined) {
+                result.hours_in_operation = msg.data.hoursInOperation;
+            }
             return result;
         },
     },
@@ -42,21 +45,26 @@ export default {
         presets.numeric('water_consumed_liters', access.STATE)
             .withUnit('L')
             .withDescription('Consumo total (L)'),
+        presets.numeric('hours_in_operation', access.STATE)
+            .withUnit('h')
+            .withDescription('Horas em operação'),
     ],
+
     configure: async (device, coordinatorEndpoint) => {
         const endpoint = device.getEndpoint(1);
+        console.log('Iniciando configure');
         if (!endpoint) return;
         await reporting.bind(endpoint, coordinatorEndpoint, ['seMetering']);
         try {
             await reporting.readMeteringMultiplierDivisor(endpoint);
-        } catch (e) {}
+        } catch (e) {
+        console.log('Bind do coordenador falhou: ', e.message);
+        }
 
         try {
-            await reporting.currentSummDelivered(endpoint, {min: 0, max: 3600, change: 1});
-        } catch (e) {}
-
-        try {
-            await endpoint.read('seMetering', ['currentSummDelivered']);
-        } catch (e) {}
+            await endpoint.read('seMetering', ['currentSummDelivered','hoursInOperation']);
+        } catch (e) {
+        console.log('Read do atributo falhou: ', e.message);
+        }
     },
 };
